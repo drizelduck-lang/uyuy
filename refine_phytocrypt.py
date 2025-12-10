@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Refine a video into a PhytoCrypt smooth modern cartoon style.
-Usage:
+Refine a video into PhytoCrypt smooth modern cartoon style.
+Run:
     python refine_phytocrypt.py --input input.mp4 --output refined.mp4
 """
 
@@ -14,7 +14,6 @@ from tqdm import tqdm
 import argparse
 import tempfile
 
-# Parameters you can tweak
 NUM_QUANT_COLORS = 6
 BILATERAL_ITER = 3
 BILATERAL_D = 9
@@ -26,18 +25,9 @@ HUE_SHIFT = -20
 SATURATION_BOOST = 1.15
 STROKE_WEIGHT = 1.0
 
-TARGET_PALETTE = [
-    (220, 255, 170),
-    (170, 245, 255),
-    (255, 245, 170),
-    (40, 120, 30),
-    (15, 90, 120),
-    (250, 250, 250)
-]
-
 def quantize_colors(img_bgr, n_colors=6):
     img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    h, w, c = img.shape
+    h, w, _ = img.shape
     X = img.reshape((-1,3)).astype(np.float32) / 255.0
     kmeans = KMeans(n_clusters=n_colors, random_state=0, n_init=4).fit(X)
     centers = (kmeans.cluster_centers_ * 255).astype(np.uint8)
@@ -81,20 +71,22 @@ def stylize_frame(img):
 def process_video(input_path, output_path):
     clip = VideoFileClip(input_path)
     fps = clip.fps
-    temp_dir = tempfile.mkdtemp(prefix="phyto_")
 
-    frames = []
+    temp_dir = tempfile.mkdtemp(prefix="phyto_")
     frame_paths = []
 
-    for i, frame in enumerate(tqdm(clip.iter_frames(dtype="uint8"), desc="Extracting frames")):
+    for i, frame in enumerate(tqdm(clip.iter_frames(dtype="uint8"), desc="Processing frames")):
         bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         out = stylize_frame(bgr)
-        path = os.path.join(temp_dir, f"frame_{i:06d}.png")
+        path = os.path.join(temp_dir, "frame_%06d.png" % i)
         cv2.imwrite(path, out)
         frame_paths.append(path)
 
     from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-    final_clip = ImageSequenceClip([cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB) for p in frame_paths], fps=fps)
+    final_clip = ImageSequenceClip(
+        [cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB) for p in frame_paths],
+        fps=fps
+    )
 
     if clip.audio is not None:
         final_clip = final_clip.set_audio(clip.audio)

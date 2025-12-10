@@ -1,126 +1,109 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>PhytoCrypt – Signature Result</title>
+#!/usr/bin/env python3
+"""
+Refine a video into a PhytoCrypt smooth modern cartoon style.
+Usage:
+    python refine_phytocrypt.py --input input.mp4 --output refined.mp4
+"""
 
-    <!-- Use your existing theme -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
+import os
+import cv2
+import numpy as np
+from moviepy.editor import VideoFileClip
+from sklearn.cluster import KMeans
+from tqdm import tqdm
+import argparse
+import tempfile
 
-<body>
-<div class="container">
+# Parameters you can tweak
+NUM_QUANT_COLORS = 6
+BILATERAL_ITER = 3
+BILATERAL_D = 9
+BILATERAL_SIGMA = 75
+EDGE_BLUR = 1
+EDGE_THRESHOLD = 45
+GLOW_STRENGTH = 0.35
+HUE_SHIFT = -20
+SATURATION_BOOST = 1.15
+STROKE_WEIGHT = 1.0
 
-    <!-- HEADER -->
-    <header class="header">
-        <img src="{{ url_for('static', filename='PHYTOCRYPT LOGO (PLAIN) (1).png') }}" alt="Logo" class="logo">
-        <h1>Signature Verification Result</h1>
-    </header>
+TARGET_PALETTE = [
+    (220, 255, 170),
+    (170, 245, 255),
+    (255, 245, 170),
+    (40, 120, 30),
+    (15, 90, 120),
+    (250, 250, 250)
+]
 
-    <!-- STATUS BOX -->
-    {% if result %}
-        {% set box_class = 
-            "alert-success" if result.decision in ["ACCEPTED","REGISTERED"] else 
-            "alert-warning" if result.decision == "UNCERTAIN" else 
-            "alert-danger"
-        %}
-        <div class="alert {{ box_class }}" style="margin-top:1.5em;">
-            <strong>Status:</strong> {{ result.decision }} <br>
-            {% if result.reason %}
-                <strong>Details:</strong> {{ result.reason }}
-            {% endif %}
-        </div>
-    {% endif %}
+def quantize_colors(img_bgr, n_colors=6):
+    img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    h, w, c = img.shape
+    X = img.reshape((-1,3)).astype(np.float32) / 255.0
+    kmeans = KMeans(n_clusters=n_colors, random_state=0, n_init=4).fit(X)
+    centers = (kmeans.cluster_centers_ * 255).astype(np.uint8)
+    labels = kmeans.labels_
+    quant = centers[labels].reshape((h,w,3))
+    return cv2.cvtColor(quant, cv2.COLOR_RGB2BGR)
 
-    <!-- SIGNATURE INFO -->
-    <div class="card" style="margin-top:1.5em;">
-        <h2>Signature Information</h2>
+def edge_mask(img_bgr):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+    lap = cv2.Laplacian(gray, cv2.CV_8U, ksize=3)
+    _, thresh = cv2.threshold(lap, EDGE_THRESHOLD, 255, cv2.THRESH_BINARY)
+    if EDGE_BLUR > 0:
+        thresh = cv2.GaussianBlur(thresh, (3,3), EDGE_BLUR)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    thick = cv2.dilate(thresh, kernel, iterations=int(max(1, round(STROKE_WEIGHT))))
+    mask = 255 - thick
+    return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-        <p><strong>Signer ID:</strong> {{ signer_id }}</p>
-        <p><strong>Hashing Mode:</strong> {{ hash_mode }}</p>
+def stylize_frame(img):
+    smooth = img.copy()
+    for _ in range(BILATERAL_ITER):
+        smooth = cv2.bilateralFilter(smooth, BILATERAL_D, BILATERAL_SIGMA, BILATERAL_SIGMA)
 
-        {% if result.confidence %}
-            <p><strong>Confidence Score:</strong> {{ result.confidence }}%</p>
-        {% endif %}
-        {% if result.distance %}
-            <p><strong>Feature Distance:</strong> {{ result.distance }}</p>
-        {% endif %}
-    </div>
+    quant = quantize_colors(smooth, NUM_QUANT_COLORS)
 
-    <!-- IMAGE PREVIEWS -->
-    <div class="grid-container" style="margin-top:1.5em;">
-        <div class="card">
-            <h3>Stored Reference Signature</h3>
-            {% if result.stored_image %}
-                <img src="{{ url_for('serve_upload', filename=result.stored_image) }}"
-                     alt="Stored Signature"
-                     class="preview-image">
-            {% else %}
-                <p>No stored reference image.</p>
-            {% endif %}
-        </div>
+    hsv = cv2.cvtColor(quant, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:,:,0] = (hsv[:,:,0] + (HUE_SHIFT / 2.0)) % 180
+    hsv[:,:,1] = np.clip(hsv[:,:,1] * SATURATION_BOOST, 0, 255)
+    quant = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-        <div class="card">
-            <h3>Uploaded Signature</h3>
-            {% if result.uploaded_image %}
-                <img src="{{ url_for('serve_upload', filename=result.uploaded_image) }}"
-                     alt="Uploaded Signature"
-                     class="preview-image">
-            {% else %}
-                <p>No uploaded image.</p>
-            {% endif %}
-        </div>
-    </div>
+    edges = edge_mask(img)
+    combined = (quant.astype(np.float32) * (edges.astype(np.float32)/255.0)).astype(np.uint8)
 
-    <!-- FEATURES -->
-    {% if result.features %}
-        <div class="card" style="margin-top:1.5em;">
-            <h2>Extracted Signature Features</h2>
-            <pre class="hash-output">{{ result.features | tojson(indent=2) }}</pre>
-        </div>
-    {% endif %}
+    gray = cv2.cvtColor(combined, cv2.COLOR_BGR2GRAY)
+    _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    glow = cv2.GaussianBlur(cv2.bitwise_and(combined, combined, mask=bright), (0,0), 15)
+    final = cv2.addWeighted(combined.astype(np.float32), 1.0, glow.astype(np.float32), GLOW_STRENGTH, 0)
+    return final.astype(np.uint8)
 
-    <!-- HASHES -->
-    {% if result.hashes %}
-        <div class="card" style="margin-top:1.5em;">
-            <h2>Hash Outputs</h2>
+def process_video(input_path, output_path):
+    clip = VideoFileClip(input_path)
+    fps = clip.fps
+    temp_dir = tempfile.mkdtemp(prefix="phyto_")
 
-            {% if result.hashes.bio_key %}
-                <p><strong>Bio-Key:</strong></p>
-                <pre class="hash-output">{{ result.hashes.bio_key }}</pre>
-            {% endif %}
+    frames = []
+    frame_paths = []
 
-            {% if result.hashes.hybrid_hash %}
-                <p><strong>Hybrid Hash:</strong></p>
-                <pre class="hash-output">{{ result.hashes.hybrid_hash }}</pre>
-            {% endif %}
+    for i, frame in enumerate(tqdm(clip.iter_frames(dtype="uint8"), desc="Extracting frames")):
+        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        out = stylize_frame(bgr)
+        path = os.path.join(temp_dir, f"frame_{i:06d}.png")
+        cv2.imwrite(path, out)
+        frame_paths.append(path)
 
-            {% if result.hashes.hmac %}
-                <p><strong>File HMAC:</strong></p>
-                <pre class="hash-output">{{ result.hashes.hmac }}</pre>
-            {% endif %}
-        </div>
-    {% endif %}
+    from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+    final_clip = ImageSequenceClip([cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB) for p in frame_paths], fps=fps)
 
-    <!-- MATCHED SAMPLES -->
-    {% if result.matches %}
-        <div class="card" style="margin-top:1.5em;">
-            <h2>Matched Samples</h2>
+    if clip.audio is not None:
+        final_clip = final_clip.set_audio(clip.audio)
 
-            {% for match in result.matches %}
-                <div style="margin-bottom:1em;">
-                    <strong>File:</strong> {{ match.sample_file_name }}<br>
-                    <strong>Distance:</strong> {{ match.phash_distance }}<br>
-                </div>
-            {% endfor %}
-        </div>
-    {% endif %}
+    final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", threads=4)
 
-    <!-- BACK BUTTON -->
-    <div style="text-align:center; margin-top:2em;">
-        <a href="/" class="btn btn-secondary">Back to Home</a>
-    </div>
-
-</div>
-</body>
-</html>
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", "-i", required=True)
+    parser.add_argument("--output", "-o", required=True)
+    args = parser.parse_args()
+    process_video(args.input, args.output)
